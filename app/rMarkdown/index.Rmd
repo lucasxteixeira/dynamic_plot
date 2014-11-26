@@ -1,0 +1,406 @@
+---
+title: "Semantic dynamic systematic reviews of online learning applied to healthcare professionals: A reproducible research project"
+runtime: shiny
+output: html_document
+---
+
+```{r, echo=FALSE}
+
+## R code for configuring interactivity ##
+
+library(rrdf)
+library(data.table)
+library(metafor)
+library(maps)
+library(leaflet)
+
+endpoint = "http://localhost:8890/sparql/"
+
+query <- "
+PREFIX qb: <http://purl.org/linked-data/cube#>
+PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+PREFIX dct: <http://purl.org/dc/terms/>
+PREFIX geo: <http://www.w3.org/2003/01/geo/wgs84_pos#>
+PREFIX ctma: <http://purl.org/clinical-trials-meta-analysis/>
+PREFIX eg: <http://purl.org/clinical-trials-meta-analysis-data-cube/>
+SELECT
+  ?PUBMED·ID ?Title ?Author (<bif:year>(?date) AS ?Year) ?Objective ?Profession ?Degree
+  ?expt·n ?expt·mean ?expt·sd ?ctrl·n ?ctrl·mean ?ctrl·sd
+  ?arm·expt ?arm·ctrl ?Success·expt ?Success·ctrl
+  ?lat ?long
+WHERE
+{
+  ?obs rdf:type qb:Observation .
+  ?obs rdf:type ctma:Study .
+  ?obs qb:dataSet eg:datasetDynamicMetaAnalysis .
+  ?obs dct:identifier ?PUBMED·ID .
+  ?obs dct:title ?Title .
+  ?obs dct:creator ?Author .
+  ?obs dct:subject ?Subject .
+  ?obs dct:date ?date .
+  ?obs dct:coverage ?coverage .
+  ?coverage geo:lat ?lat .
+  ?coverage geo:long ?long .
+  ?obs ctma:objective ?Objective .
+  ?obs dct:audience ?Profession .
+  ?obs dct:educationalLevel ?Degree .
+  ?obs ctma:followUpDays ?Follow·days .
+  ?obs ctma:arm ?arm .
+  ?obs ctma:sampleSizeIntervention ?expt·n .
+  ?obs ctma:timeLearningAvgIntervention ?expt·mean .
+  ?obs ctma:timeLearningSdIntervention ?expt·sd .
+  ?obs ctma:sampleSizeControl ?ctrl·n .
+  ?obs ctma:timeLearningAvgControl ?ctrl·mean .
+  ?obs ctma:timeLearningSdControl ?ctrl·sd .
+  ?obs ctma:armInterventionDescription ?arm·expt .
+  ?obs ctma:armControlDescription ?arm·ctrl .
+  ?obs ctma:successIntervention ?Success·expt .
+  ?obs ctma:successControl ?Success·ctrl .
+  ?obs ctma:firstOutcome ?firstOutcome .
+  ?firstOutcome ctma:outcomeDescription ?fir·out·desc .
+  ?firstOutcome ctma:methodMeasureOutcome ?fir·out·meas .
+  ?obs ctma:secondOutcome ?secondOutcome .
+  ?secondOutcome ctma:outcomeDescription ?sec·out·desc .
+  ?secondOutcome ctma:methodMeasureOutcome ?sec·out·meas .
+  ?obs ctma:thirdOutcome ?thirdOutcome .
+  ?thirdOutcome ctma:outcomeDescription ?thd·out·desc .
+  ?thirdOutcome ctma:methodMeasureOutcome ?thd·out·meas .
+  ?obs ctma:attritionRatioIntervention ?att·expt .
+  ?obs ctma:attritionRatioControl ?att·ctrl .
+  ?obs ctma:gradeSequenceGeneration ?gradeSequenceGeneration .
+  ?gradeSequenceGeneration rdf:value ?gradeSequenceGenerationValue .
+  ?obs ctma:gradeAllocationConcealment ?gradeAllocationConcealment .
+  ?gradeAllocationConcealment rdf:value ?gradeAllocationConcealmentValue .
+  ?obs ctma:gradeBlinding ?gradeBlinding .
+  ?gradeBlinding rdf:value ?gradeBlindingValue .
+  ?obs ctma:gradeLosses ?gradeLosses .
+  ?gradeLosses rdf:value ?gradeLossesValue .
+  ?obs ctma:gradeIntentionTreat ?gradeIntentionTreat .
+  ?gradeIntentionTreat rdf:value ?gradeIntentionTreatValue .
+}
+"
+
+# Run SPARQL Query to get information about the studies for the meta analysis and the geographic plot
+result <- sparql.remote(endpoint, query)
+
+# Convert the matrix result into a data frame
+qualitativeAnalysis <- data.frame(result, stringsAsFactors=FALSE)
+
+# Convert the dimensions needed for metacont (meta analysis) to numeric
+class(qualitativeAnalysis$expt.n) <- "numeric"
+class(qualitativeAnalysis$expt.mean) <- "numeric"
+class(qualitativeAnalysis$expt.sd) <- "numeric"
+class(qualitativeAnalysis$ctrl.n) <- "numeric"
+class(qualitativeAnalysis$ctrl.mean) <- "numeric"
+class(qualitativeAnalysis$ctrl.sd) <- "numeric"
+
+qualitativeAnalysis$"expt(n,mean,sd)" = paste(qualitativeAnalysis$expt.n, qualitativeAnalysis$expt.mean, qualitativeAnalysis$expt.sd, sep=" - ")
+qualitativeAnalysis$"ctrl(n,mean,sd)" = paste(qualitativeAnalysis$ctrl.n, qualitativeAnalysis$ctrl.mean, qualitativeAnalysis$ctrl.sd, sep=" - ")
+
+variables <- c("PUBMED.ID", "Title", "Author", "Year", "Objective", "Profession", "Degree",
+        "expt(n,mean,sd)", "ctrl(n,mean,sd)", "arm.expt", "arm.ctrl", "Success.expt", "Success.ctrl")
+
+# Output the qualitative data table
+output$studiesTable <- renderDataTable(
+    qualitativeAnalysis [, variables ],
+    options = list(paging = FALSE, searching = FALSE, ordering = FALSE),
+    callback = "
+    function(table) {
+            table.on('click.dt', 'tr', function() {
+                $(this).toggleClass('selected');
+                Shiny.onInputChange('rows', table.rows('.selected').indexes().toArray());
+            });
+    }"
+)
+
+map <- createLeafletMap(session, 'map')
+
+# Create reactive values in order to update the meta analysis and the geographic plot when Run Meta Analysis is pressed
+values <- reactiveValues()
+
+# Observe any changes in the data table selected rows
+observe({
+    if ( length( input$rows ) == 0 ) { # If no rows are selected consider all studies
+        quantitativeAnalysis <- qualitativeAnalysis[0,]
+        quantitativeAnalysis <- rbind( quantitativeAnalysis, qualitativeAnalysis )
+        isolate(values$plotAnalysis <- data.frame(quantitativeAnalysis$PUBMED.ID, quantitativeAnalysis$lat, quantitativeAnalysis$long, quantitativeAnalysis$Title, stringsAsFactors=FALSE))
+        isolate(names(values$plotAnalysis) <- c("ID", "Latitude", "Longitude", "Title"))
+    } else if ( length( input$rows ) > 0 ) { # Consider only selected values in the data table if there are more than one selected
+        quantitativeAnalysis <- qualitativeAnalysis[0,]
+        for ( row in input$rows ) {
+            quantitativeAnalysis <- rbind(quantitativeAnalysis, qualitativeAnalysis[ ( row + 1 ) ,])
+        }
+        isolate(values$plotAnalysis <- data.frame(quantitativeAnalysis$PUBMED.ID, quantitativeAnalysis$lat, quantitativeAnalysis$long, quantitativeAnalysis$Title, stringsAsFactors=FALSE))
+        isolate(names(values$plotAnalysis) <- c("ID", "Latitude", "Longitude", "Title"))
+    }
+
+    if ( nrow(quantitativeAnalysis) > 1 ) {
+        values$metaAnalysis <- rma(
+            m1i=expt.mean, m2i=ctrl.mean,
+            sd1i=expt.sd, sd2i=ctrl.sd,
+            n1i=expt.n, n2i=ctrl.n,
+            add = 1/2, to = "only0",
+            data=quantitativeAnalysis , measure = "SMD"
+        )
+
+        map$clearMarkers()
+
+        input$map_zoom
+
+        for ( i in 1:nrow(values$plotAnalysis) ) {
+            point <- values$plotAnalysis[i,]
+            map$addMarker(
+                point$Latitude,
+                point$Longitude,
+                point$PUBMED.ID,
+                list(
+                    awesome=list(
+                        icon=NULL,
+                        markerColor="cadetblue"
+                    )
+                )
+            )
+        }
+    }
+})
+
+output$forestPlot <- renderPlot({
+    forest(values$metaAnalysis, main="Forest Plot")
+})
+
+output$funnelPlot <- renderPlot({
+    funnel(values$metaAnalysis, main="Funnel Plot")
+})
+
+output$radialPlot <- renderPlot({
+    radial(values$metaAnalysis, main="Radial Plot")
+})
+```
+
+
+Taís de Campos Moreira    
+Lucas de Oliveira Teixeira    
+Jacson Barros    
+Joao Ricardo Nickenig Vissoci    
+Uhana Seifert Guimaraes Suga    
+Lucas Lentini H. de Oliveira    
+Ricardo Pietrobon    
+
+## Abstract
+Although systematic reviews and meta-analysis in education are supposed to capture the best available evidence in the literature, the judgment regarding which articles are rated as either "the best evidence" or the most applicable to different context is left entirely to the author. We present a semantic approach to this problem where the data from individual randomized trials are encoded using a computational ontology. This data set is then processed using a statistical language and presented as a Web application that allows peers and the general public to choose the criteria that they judge to be more appropriate in aggregating study results. Given the dynamic nature of this approach, we expect that time to inclusion of trials in meta-analyses might be reduced, also allowing for personalization of results to contexts that are specific to individual readers.
+
+## Introduction
+
+Online education is a major driving mechanism in the lifelong learning path of healthcare professionals <!-- ref -->. Despite a large number of systematic reviews and meta-analyses focusing on multiple aspects of online learning applied to healthcare professionals, the speed at which online learning technologies evolve largely defies our ability to create and maintain our reviews up to date <!-- ref -->. In contrast with this need, the field still largely relies on publications modes that can hardly address the practitioners' needs <!-- ref -->.
+
+Traditionally, educational practice has been driven by more opinion than evidence <!-- ref -->. It was only recently that the number of randomized experiments and the overall quality in the reporting of other study designs has allowed for the execution of systematic reviews and meta-analyses <!-- ref -->. In education applied to healthcare in specific, recent efforts by researchers such as David Cook and <!-- add others --> have recently led to information that can now guide education policy in ways that were previously not possible <!-- ref -->. A recent example is <!-- example policy guided by systematic reviews in healthcare education -->
+
+<!-- overview of traditional systematic reviews and meta-analyses in online learning applied to healthcare education - work by david cook -->
+
+Despite of a significant increase in the number and quality of systematic reviews in education applied to healthcare <!-- ref -->, the field is not without problems. First, the time lag between the completion of studies and their inclusion in systematic reviews is still very large <!-- ref -->. If an additional five years are added in order to these systematic reviews to be finally translated into practice guidelines <!-- ref --> and put into educational practice, we are likely looking at somewhere around 10 years between knowing that something works and then providing society with the benefit of that knowledge. Second, although meta-analysis are conducted with the intent of being reproducible by peers, this assumption can and should be put into question. For example, it has been demonstrated that the exact same set of articles in a meta-analysis can lead to fairly different conclusions depending on which articles are included based on a wide range of quality scales (juni1999hazards). However, in its current format, systematic reviews do not allow researchers, policy makers or any others to attempt alternative assumptions, presenting instead a monolythic, falsely objective view of the literature.
+
+As an alternative to the problems previously outlined, in the past few years semantic technologies now allow for databases to be dynamically created and distributed [@allemang2011semantic]. Specifically, the [Linked Open Data](http://linkeddata.org/) movement allows for research articles to not only be published with a number of data points on each article that greatly supersedes the traditional [PubMed abstracts](http://www.ncbi.nlm.nih.gov/pubmed), but also to bring in information about these articles that were previously not available. A typical example is the potential to map individual articles to the geographic location where each study was conducted, therefore assisting readers in evaluating whether their results might or not be relevant to them.
+
+In light of the current issues with the literature, the objective of this article is to demonstrate a semantic, dynamic framework for systematic reviews and meta-analyses in online learning applied to healthcare education, where results can be dynamically displayed and stratified.
+
+## Methods
+
+
+### Demonstration systematic review and meta-analysis articles
+
+As a demonstration of the dynamic, semantic meta-analysis framework we used the systematic review by @du2013web as well as by @cook2010time. The systematic review by @du2013web, 2013 included 9 studies: @bloomfield2010effect,@chiu2009effectiveness, @fernandez2011effects, @gerdprasert2010development, @horiuchi2009evaluation, @lu2009effects, @makinen2006teaching, @smeekens2011successful,@mcmullan2011effect.
+
+
+The systematic review by @cook2010time, 2010 included 20 studies: @papa1999effects, @bell2000self, @grundman2000controlled, @spickard2002learning, @dennis2003problem, @leong2003integrating, @mattheos2004effects, @spickard2004randomised, @cook2005web,@blackmore2006role, @schittek2005computer,, @cook2006impact, @friedl2006multimedia, @friedl2006comparative, @nicholson2006can, @cook2008adapting, @cook2008introducing, @kopp2008fostering, @tunuguntla2008computer, @cook2010time.  
+
+<!-- Taís, deixar os links pros full text é bom pra gente, mas pro artigo vamos precisar substituir pela citação em bibtex -->
+
+The extracted data are provided as a CSV (comma-separated values) under FigShare <!-- Taís, por favor adiciona --> as well as a [Google spreadsheet](https://docs.google.com/spreadsheet/ccc?key=0AuL3GiehWhDMdDVTRmtmV185ajMxbEZxd2plTllCNEE#gid=0). Finally, as will be detailed below, the data are made available in a directly queriable format through our [SPARQL endpoint](http://ppv1.hc.fm.usp.br/dynamic-meta-analysis/sparql/), from which a direct analysis can also be performed.
+
+Data:
+
+```{r, echo=FALSE}
+dataTableOutput('studiesTable')
+```
+
+<!-- Lucas, em algum lugar do artigo a gente deveria ter um link pra um gist que mostre exemplos de sparql statements -->
+
+### Use case
+
+The first step in the [Unified Process for ONtology (UPON)](http://wwwusers.di.uniroma1.it/~navigli/pubs/De_Nicola_Missikoff_Navigli_2009.pdf) is defining an informal use case to support the ontology modeling. The informal use case develop for this study is presented below:
+<!-- [Informal use case](http://www.agilemodeling.com/artifacts/systemUseCase.htm) -->
+
+<!-- Table 1. Informal use case -->
+
+* User go to the Web application and either browses or searches across systematic reviews and RCTs
+* For each systematic review or study, the user can stratify results based on a set of fields from the ontology developed
+* Results are presented in both a qualitative as well as, when available, a quantitative perspective
+* For qualitative results a table and Venn diagram showing overlapping characteristics are displayed
+* For quantitative results, OR with 95% CI, forest, funnel and radial plot are displayed
+
+### Ontology structure
+
+Our ontology engineering process is loosely based on [UPON](https://docs.google.com/file/d/0B4Ke-17mTW1_eWZpeUNRa2pUVVE/edit) and [Agile](http://agilemanifesto.org/) methodologies. Thus, our approach is use-case driven divided in incremental cycles. Each cycle focus in a specific use-case that relies on a stakeholder need. Briefly, we followed these steps:
+
+1. Defined an informal use case, specifically focusing on the end-product our users were expected to obtain from the application
+1. Outlined the main sections from each articles included in the Cook meta-analysis, including both qualitative and quantitative components
+2. Outlined a first version of the ontology and instantiated it with data
+1. Released a qualitative table outlining the main characteristics of each study
+3. Conducted a meta-analysis using by directly importing the RDF instances into the R language <!-- r citation --> using the [metafor package]() <!-- e o outro pacote pra avaliação de bias em variaveis continuas? samurai? O metafor consegue realizar a meta analise e gerar os graficos para variaveis continuas -->
+1. Presented the results to an educator and went back to the beginning of the cycle to address any issues
+
+In developing an ontology to represent the terms used in educational meta-analyses, we re-used terms from the [Clinical Trials Meta-Analysis Ontology]() (CTMA)<!--Lucas, create purl and describe here -->. Many terms in educational meta-analyses are similar to terms already defined in [Dublin Core]() thus many terms are reused. The Table 1 presents the [Dublin Core]() terms reused and their role in CTMA.
+
+Table 1. Terms reused from Dublin Core.
+
+Dublin Core Term | Role in CTMA
+---------------- | ------------
+identifier | PUBMED ID of the study
+title | Title of the study
+creator | First author of the study
+
+
+The CTMA is represented in Figure X. <!-- CTMA is the vocabulary that I created to represent the meta analyses data -->
+
+<!--Lucas, please create figure of CTMA structure,
+  Ricardo, is it necessary to explain every class and property?
+
+  acho que sim
+-->
+
+The ontology were then combined with the [RDF Data Cube]() to enrich the semantic representation of the resulting statistical data. The following example is a study represented using CTMA and RDF Data Cube:
+
+
+
+Finally, CTMA is licensed under [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0.html) and it is available under our [SPARQL Endpoint](http://ppv1.hc.fm.usp.br/dynamic-meta-analysis/sparql/).
+
+<!-- each subpopulation dyad (proportion of the number of successes over the total number of people) is specific for dyad each result dyad(specific outcome and specific intervention arm). For example, assume that a trial is comparing two arms (control vs. educational intervention A) for three outcomes (course completion, satisfied with course, and would recommend course to others). the following points have to be captured for this trial: rate of course completion for control (total number of students who completed course vs total number of students), rate of course completion for intervention, rate of satisfaction for control, ... -->
+
+### Linking data to the systematic review or data analysis
+
+[The Citation Typing Ontology (CiTO)](http://speroni.web.cs.unibo.it/cgi-bin/lode/req.py?req=http:/purl.org/spar/cito) is a ontology for the characterization of citations. It allows the semantic representation of citations of articles in general.
+
+We have also combined CTMA with CiTO. This was possible because all studies selected for the demonstration of our framework were already published. The following example represents the additions needed for CiTO.
+
+<!-- Lucas, explicit additions -->
+
+Finally, in order to demonstrate the practical applicability of CiTO, we generate the references for this article using it. 
+
+<!--
+[CiTO, the Citation Typing Ontology](http://speroni.web.cs.unibo.it/cgi-bin/lode/req.py?req=http:/purl.org/spar/cito)
+
+http://www.carlboettiger.info/
+
+https://github.com/cboettig/knitcitations
+
+http://citationstyles.org/
+-->
+
+<!-- Jacson, cito is included in knitcitations and only requires the DOI - do you know whether DOI is included in the pubmed lod? a connection with cito could lead in another paper toward a facilitated search for additional rcts if we connect it to the pubmed API to search for related articles. could also do some hacking of google scholar in order to get citing and cited articles. see http://goo.gl/wvQEdG for an example. all of this is not for now, this will be part of the discussion section as future development -->
+
+<!-- connection to linkedct through pmid -->
+
+
+
+### Statistical analysis
+
+All analyses were conducted using the R language (@R2013). Specifically, we accessed the data through the previously created SPARQL endpoint using the rrdf package(@rrdf2013) package for rdf manipulation. The data were then converted into a dataframe, which is the equivalent of a flat table. Subsequently, we used the [metafor]() package for meta-analysis, forest, funnel and radial plot and the [QCA](http://journal.r-project.org/archive/2013-1/thiem-dusa.pdf) and [Venn diagram](http://cran.r-project.org/web/packages/VennDiagram/VennDiagram.pdf) package for qualitative analysis.
+
+### Web application
+
+The Web application were develop using [Shiny framework]() and it is available in our [server](http://ppv1.hc.fm.usp.br/dynamic-meta-analysis/). Shiny is a web application framework for R.
+
+
+
+### Reproducible research methodology
+
+In order to make this study reproducible, we followed a series of published recommendations. <!-- vissoci, also include article talking about higher standards published in plos on - see timss article and also fingerprint -->. These included 
+<!-- figshare all data, github all data and scripts, sparql endpoint, 
+
+store R, it's packages, and d2rq  -->
+
+## Results
+
+### Ontology description
+
+sparql endpoint
+sparql scripts pra acessar endpoint - exemplos de queries
+
+
+
+### Application functionality
+
+videos, url site
+
+#### Qualitative results
+
+Figure 1: Venn diagram  
+![](https://lh3.googleusercontent.com/-zwj7ZtypmFM/Uf_QQBk20TI/AAAAAAAA0TA/sceZE11vVhA/w428-h329-no/Screen+Shot+2013-08-05+at+12.16.51+PM.png)
+
+
+#### Quantitative results
+
+Figure 2: Forest plot  
+
+```{r, echo=FALSE}
+plotOutput('forestPlot', width="100%")
+```
+
+Figure 3: Funnel plot
+```{r, echo=FALSE}
+plotOutput('funnelPlot', width="100%")
+```
+
+Figure 4: Radial plot
+```{r, echo=FALSE}
+plotOutput('radialPlot', width="100%")
+```
+
+Figure 5: Map
+```{r, echo=FALSE}
+leafletMap(
+    "map", "100%", 400,
+    options=list(
+        center = c(39, -98),
+        zoom = 4,
+        maxBounds = list(list(17, -180), list(59, 180))
+    )
+)
+```
+
+### Data availability
+
+csv google sheets
+
+### Reproducible research methodology
+github
+Joao's paper
+figshare
+
+
+
+## Discussion
+
+<!-- advantages more info and more specific than what cochrane/revman recommends allows for peer-review after study is published - talk about http://goo.gl/YM699D -->
+
+
+### Primacy and summary
+
+### Result 1
+
+comparison with [OCRe](https://code.google.com/p/ontology-of-clinical-research/)
+
+The Ontology of Clinical Research (OCRe) is rather complex and, apparently, not supported anymore. The Clinical Case Meta-Analyses Ontology (CTMA) develop is a simple ontology to represent data for clinical trials meta-analysis. <!-- Explicit the differenced about OCRe and CTMA -->
+
+Furthermore, we have found that there is a lack of solutions to represent clinical trials data as linked data.  
+
+### Result 2
+### Result 3
+### Result 4
+### Limitations
+
+### Future
+compliance consort included into ontology
+cito reason for citation for citing and cited articles
+
+### References
