@@ -1,0 +1,7 @@
+For image build use inside Dockerfile directory:
+
+docker build -t sporedata/companionsite .
+
+For container run use:
+
+docker run -d -p 3838:3838 sporedata/companionsite
