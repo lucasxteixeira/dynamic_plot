@@ -5,7 +5,8 @@ ENV HOME /root
 
 # Add ubuntu updated repository
 RUN echo "deb http://archive.ubuntu.com/ubuntu trusty-backports main restricted universe" >> /etc/apt/sources.list
-RUN (echo "deb http://cran.mtu.edu/bin/linux/ubuntu trusty/" >> /etc/apt/sources.list && apt-key adv --keyserver keyserver.ubuntu.com --recv-keys E084DAB9)
+RUN echo "deb http://cran.rstudio.com/bin/linux/ubuntu trusty/" >> /etc/apt/sources.list
+RUN apt-key adv --keyserver hkp://keyserver.ubuntu.com --recv-keys E084DAB9
 
 # Update
 RUN apt-get update
